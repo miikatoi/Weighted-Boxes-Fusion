@@ -6,7 +6,7 @@ import warnings
 import numpy as np
 
 
-def prefilter_boxes(boxes, scores, labels, weights, thr):
+def prefilter_boxes(boxes, scores, labels, ids, weights, thr):
     # Create dict with boxes stored by its label
     new_boxes = dict()
 
@@ -25,6 +25,7 @@ def prefilter_boxes(boxes, scores, labels, weights, thr):
             if score < thr:
                 continue
             label = int(labels[t][j])
+            _id = int(ids[t][j])
             box_part = boxes[t][j]
             x1 = float(box_part[0])
             y1 = float(box_part[1])
@@ -67,7 +68,7 @@ def prefilter_boxes(boxes, scores, labels, weights, thr):
                 continue
 
             # [label, score, weight, model index, x1, y1, x2, y2]
-            b = [int(label), float(score) * weights[t], weights[t], t, x1, y1, x2, y2]
+            b = [int(label), float(score) * weights[t], weights[t], t, x1, y1, x2, y2, _id]
             if label not in new_boxes:
                 new_boxes[label] = []
             new_boxes[label].append(b)
@@ -88,12 +89,12 @@ def get_weighted_box(boxes, conf_type='avg'):
     :return: weighted box (label, score, weight, model index, x1, y1, x2, y2)
     """
 
-    box = np.zeros(8, dtype=np.float32)
+    box = np.zeros(9, dtype=np.float32)
     conf = 0
     conf_list = []
     w = 0
     for b in boxes:
-        box[4:] += (b[1] * b[4:])
+        box[4:8] += (b[1] * b[4:8])
         conf += b[1]
         conf_list.append(b[1])
         w += b[2]
@@ -104,7 +105,10 @@ def get_weighted_box(boxes, conf_type='avg'):
         box[1] = np.array(conf_list).max()
     box[2] = w
     box[3] = -1 # model index field is retained for consistency but is not used.
-    box[4:] /= conf
+    box[4:8] /= conf
+
+    idx = np.array(conf_list).argmax()
+    box[-1] = boxes[idx][-1]
     return box
 
 
@@ -136,7 +140,7 @@ def find_matching_box_fast(boxes_list, new_box, match_iou):
     # boxes = np.array(boxes_list)
     boxes = boxes_list
 
-    ious = bb_iou_array(boxes[:, 4:], new_box[4:])
+    ious = bb_iou_array(boxes[:, 4:8], new_box[4:8])
 
     ious[boxes[:, 0] != new_box[0]] = -1
 
@@ -154,6 +158,7 @@ def weighted_boxes_fusion(
         boxes_list,
         scores_list,
         labels_list,
+        ids_list = None,
         weights=None,
         iou_thr=0.55,
         skip_box_thr=0.0,
@@ -181,6 +186,16 @@ def weighted_boxes_fusion(
     :return: labels: boxes labels
     '''
 
+    if ids_list is None:
+        _id = 0
+        ids_list = []    
+        for boxes in boxes_list:
+            _ids = []
+            for box in boxes:
+                _ids.append(_id)
+                _id += 1
+            ids_list.append(_ids)
+
     if weights is None:
         weights = np.ones(len(boxes_list))
     if len(weights) != len(boxes_list):
@@ -192,15 +207,15 @@ def weighted_boxes_fusion(
         print('Unknown conf_type: {}. Must be "avg", "max" or "box_and_model_avg", or "absent_model_aware_avg"'.format(conf_type))
         exit()
 
-    filtered_boxes = prefilter_boxes(boxes_list, scores_list, labels_list, weights, skip_box_thr)
+    filtered_boxes = prefilter_boxes(boxes_list, scores_list, labels_list, ids_list, weights, skip_box_thr)
     if len(filtered_boxes) == 0:
-        return np.zeros((0, 4)), np.zeros((0,)), np.zeros((0,))
+        return np.zeros((0, 4)), np.zeros((0,)), np.zeros((0,)), np.zeros((0,))
 
     overall_boxes = []
     for label in filtered_boxes:
         boxes = filtered_boxes[label]
         new_boxes = []
-        weighted_boxes = np.empty((0, 8))
+        weighted_boxes = np.empty((0, 9))
 
         # Clusterize boxes
         for j in range(0, len(boxes)):
@@ -242,7 +257,8 @@ def weighted_boxes_fusion(
         overall_boxes.append(weighted_boxes)
     overall_boxes = np.concatenate(overall_boxes, axis=0)
     overall_boxes = overall_boxes[overall_boxes[:, 1].argsort()[::-1]]
-    boxes = overall_boxes[:, 4:]
+    boxes = overall_boxes[:, 4:8]
     scores = overall_boxes[:, 1]
     labels = overall_boxes[:, 0]
-    return boxes, scores, labels
+    ids = overall_boxes[:, -1]
+    return boxes, scores, labels, ids
